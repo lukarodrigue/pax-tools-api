@@ -1,0 +1,22 @@
+# Uso local com tudo em container:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Para desenvolver mesmo, prefira subir so o banco e rodar
+# "npm run dev" em api/ e em web/ (ver README).
+services:
+  banco:
+    ports:
+      - "5432:5432"
+
+  api:
+    environment:
+      COOKIE_SEGURO: "false"
+    ports:
+      - "3000:3000"
+
+  web:
+    ports:
+      - "8080:80"
+
+  proxy:
+    profiles: ["so-no-servidor"]

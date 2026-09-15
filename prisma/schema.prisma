@@ -1,0 +1,97 @@
+enum Papel {
+  ROOT   // tudo, inclusive lixeira e definicao de papeis
+  ADMIN  // exclui links (vao para a lixeira) e gerencia usuarios PADRAO
+  PADRAO // usa o sistema, nao exclui nada
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Usuario {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  nome      String
+  senhaHash String
+  ativo     Boolean   @default(true)
+  papel     Papel     @default(PADRAO)
+  /// senha definida por outra pessoa: obriga troca no proximo acesso
+  precisaTrocarSenha Boolean @default(false)
+  criadoEm  DateTime  @default(now())
+
+  sessoes        Sessao[]
+  links          Link[]   @relation("LinksCriados")
+  linksExcluidos Link[]   @relation("LinksExcluidos")
+  termos         Termo[]
+}
+
+model Sessao {
+  id         String   @id
+  usuarioId  String
+  expiraEm   DateTime
+  criadoEm   DateTime @default(now())
+
+  usuario    Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId])
+}
+
+/// Agrupamento do painel: "Planilhas de TI", "Sistemas", "Filiais"...
+model Grupo {
+  id       String @id @default(cuid())
+  nome     String @unique
+  ordem    Int    @default(0)
+
+  links    Link[]
+}
+
+model Link {
+  id          String   @id @default(cuid())
+  titulo      String
+  url         String
+  descricao   String?
+  ordem       Int      @default(0)
+  /// marque true para planilha/sistema que deve ser aposentado
+  aDescontinuar Boolean @default(false)
+  criadoEm    DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  grupoId     String
+  grupo       Grupo    @relation(fields: [grupoId], references: [id], onDelete: Restrict)
+
+  criadoPorId String?
+  criadoPor   Usuario? @relation("LinksCriados", fields: [criadoPorId], references: [id], onDelete: SetNull)
+
+  /// lixeira: preenchido = fora do painel, recuperavel pelo ROOT
+  excluidoEm   DateTime?
+  excluidoPorId String?
+  excluidoPor   Usuario? @relation("LinksExcluidos", fields: [excluidoPorId], references: [id], onDelete: SetNull)
+
+  @@index([grupoId, ordem])
+  @@index([excluidoEm])
+}
+
+/// Registro de cada termo emitido — rastreabilidade de quem recebeu o quê.
+model Termo {
+  id           String   @id @default(cuid())
+  nomePessoa   String
+  cpf          String
+  filial       String
+  cidade       String
+  ano          Int
+  /// [{ qtd, descricao, condicao }]
+  itens        Json
+  nomeArquivo  String
+  emitidoEm    DateTime @default(now())
+
+  emitidoPorId String?
+  emitidoPor   Usuario? @relation(fields: [emitidoPorId], references: [id], onDelete: SetNull)
+
+  @@index([cpf])
+  @@index([emitidoEm])
+}

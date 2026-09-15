@@ -1,0 +1,17 @@
+# Front e API sob o mesmo hostname: /api/* vai para o servico "api",
+# todo o resto para o "web". Sao dois servicos independentes, mas o
+# navegador enxerga uma origem so — entao nao ha CORS nem cookie
+# entre dominios. Para separar em api.pax.local depois, basta criar
+# outro bloco e preencher ORIGENS_PERMITIDAS no .env.
+ferramentas.pax.local {
+	tls internal
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+}

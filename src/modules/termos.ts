@@ -5,6 +5,7 @@ import { Router } from "express";
 import JSZip from "jszip";
 import { z } from "zod";
 import { db } from "../db.js";
+import { validar } from "../http.js";
 
 const aqui = dirname(fileURLToPath(import.meta.url));
 const CAMINHO_MODELO = join(aqui, "..", "templates", "termo.docx");
@@ -24,7 +25,7 @@ const item = z.object({
 
 const corpo = z.object({
   nomePessoa: z.string().trim().min(3).max(120),
-  cpf: z.string().trim(),
+  cpf: z.string().trim().refine(cpfValido, "CPF inválido."),
   filial: z.string().trim().min(1).max(60),
   cidade: z.string().trim().min(1).max(60),
   ano: z.number().int().min(2000).max(2100),
@@ -44,8 +45,13 @@ export function cpfValido(entrada: string) {
   return true;
 }
 
+/** Aplica a máscara até onde houver dígitos: "52998" vira "529.98". */
 const formatarCpf = (v: string) =>
-  v.replace(/\D/g, "").replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
+  v
+    .replace(/\D/g, "")
+    .replace(/^(\d{3})(\d)/, "$1.$2")
+    .replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3")
+    .replace(/\.(\d{3})(\d{1,2})$/, ".$1-$2");
 
 const escaparXml = (t: string) =>
   t
@@ -68,6 +74,8 @@ function nomeArquivo(nome: string, filial: string, primeiroItem: string) {
   return `Termo_${limpo(nome)}_-_${limpo(filial)}_-_${limpo(primeiroItem.split(/\s+/)[0] ?? "Item")}.docx`;
 }
 
+const MARCADOR = /\{\{(\w+)\}\}/g;
+
 export async function montarTermo(dados: z.infer<typeof corpo>) {
   const zip = await JSZip.loadAsync(await carregarModelo());
   const arquivo = zip.file("word/document.xml");
@@ -85,11 +93,12 @@ export async function montarTermo(dados: z.infer<typeof corpo>) {
     CIDADE: dados.cidade,
   };
 
-  let xml = await arquivo.async("string");
-  for (const [chave, valor] of Object.entries(valores)) {
-    xml = xml.split(`{{${chave}}}`).join(escaparXml(valor));
-  }
-  if (xml.includes("{{")) throw new Error("Modelo tem marcador não preenchido.");
+  const modelo = await arquivo.async("string");
+  const desconhecidos = [...modelo.matchAll(MARCADOR)].map((m) => m[1]).filter((c) => !(c in valores));
+  if (desconhecidos.length) throw new Error(`Modelo tem marcador sem valor: ${desconhecidos.join(", ")}`);
+
+  // uma passada só: o que a pessoa digitou nunca é lido de novo como marcador
+  const xml = modelo.replace(MARCADOR, (_m, chave: string) => escaparXml(valores[chave]));
 
   zip.file("word/document.xml", xml);
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
@@ -99,20 +108,17 @@ export async function montarTermo(dados: z.infer<typeof corpo>) {
 export const rotasTermos = Router();
 
 rotasTermos.post("/", async (req, res) => {
-  const dados = corpo.safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: dados.error.issues[0].message });
-  if (!cpfValido(dados.data.cpf)) return res.status(400).json({ erro: "CPF inválido." });
-
-  const { buffer, nome } = await montarTermo(dados.data);
+  const dados = validar(corpo, req.body);
+  const { buffer, nome } = await montarTermo(dados);
 
   await db.termo.create({
     data: {
-      nomePessoa: dados.data.nomePessoa.toUpperCase(),
-      cpf: formatarCpf(dados.data.cpf),
-      filial: dados.data.filial.toUpperCase(),
-      cidade: dados.data.cidade,
-      ano: dados.data.ano,
-      itens: dados.data.itens,
+      nomePessoa: dados.nomePessoa.toUpperCase(),
+      cpf: formatarCpf(dados.cpf),
+      filial: dados.filial.toUpperCase(),
+      cidade: dados.cidade,
+      ano: dados.ano,
+      itens: dados.itens,
       nomeArquivo: nome,
       emitidoPorId: req.usuario!.id,
     },
@@ -128,12 +134,19 @@ rotasTermos.post("/", async (req, res) => {
 
 rotasTermos.get("/historico", async (req, res) => {
   const busca = String(req.query.busca ?? "").trim();
+  const temDigitos = /\d/.test(busca);
+  // % e _ são curingas do LIKE: sem escapar, "%" traria todos os termos
+  const literal = (t: string) => t.replace(/[\\%_]/g, "\\$&");
+
   const termos = await db.termo.findMany({
     where: busca
       ? {
           OR: [
-            { nomePessoa: { contains: busca, mode: "insensitive" } },
-            { cpf: { contains: busca.replace(/\D/g, "") } },
+            { nomePessoa: { contains: literal(busca), mode: "insensitive" } },
+            // o CPF é gravado formatado: aceita a busca como digitada ou só com números
+            ...(temDigitos
+              ? [{ cpf: { contains: literal(busca) } }, { cpf: { contains: formatarCpf(busca) } }]
+              : []),
           ],
         }
       : undefined,

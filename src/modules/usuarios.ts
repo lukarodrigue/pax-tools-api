@@ -1,7 +1,9 @@
+import { Papel } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
-import { exigirPapel, gerarHash, verificarSenha } from "../auth.js";
+import { gerarHash, verificarSenha } from "../auth.js";
 import { db } from "../db.js";
+import { ErroHttp, validar } from "../http.js";
 
 export const rotasUsuarios = Router();
 
@@ -17,7 +19,7 @@ const SELECAO = {
 
 const senhaForte = z.string().min(10, "A senha precisa de pelo menos 10 caracteres.");
 
-const papeis = z.enum(["ROOT", "ADMIN", "PADRAO"]);
+const papeis = z.nativeEnum(Papel);
 
 const novoUsuario = z.object({
   email: z.string().email("E-mail inválido."),
@@ -34,36 +36,25 @@ async function ehUltimoRoot(id: string) {
   return quantos <= 1;
 }
 
-/** ADMIN cadastra gente comum; só ROOT cria outro ADMIN ou ROOT e
- *  só ROOT mexe no papel de quem já existe. */
-function podeDefinir(quem: Express.Request["usuario"], papel: string) {
-  if (quem?.papel === "ROOT") return true;
-  return papel === "PADRAO";
-}
-
 rotasUsuarios.get("/", async (_req, res) => {
   res.json(await db.usuario.findMany({ select: SELECAO, orderBy: { nome: "asc" } }));
 });
 
 rotasUsuarios.post("/", async (req, res) => {
-  const dados = novoUsuario.safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: dados.error.issues[0].message });
+  const dados = validar(novoUsuario, req.body);
 
-  const email = dados.data.email.toLowerCase().trim();
+  const email = dados.email.toLowerCase().trim();
   if (await db.usuario.findUnique({ where: { email } })) {
-    return res.status(409).json({ erro: "Já existe usuário com esse e-mail." });
+    throw new ErroHttp(409, "Já existe usuário com esse e-mail.");
   }
 
-  const papel = dados.data.papel ?? "PADRAO";
-  if (!podeDefinir(req.usuario, papel)) {
-    return res.status(403).json({ erro: "Só o root cria usuários com papel elevado." });
-  }
+  const papel = dados.papel ?? "PADRAO";
 
   const usuario = await db.usuario.create({
     data: {
       email,
-      nome: dados.data.nome,
-      senhaHash: await gerarHash(dados.data.senha),
+      nome: dados.nome,
+      senhaHash: await gerarHash(dados.senha),
       papel,
       precisaTrocarSenha: true,
     },
@@ -73,58 +64,39 @@ rotasUsuarios.post("/", async (req, res) => {
 });
 
 rotasUsuarios.patch("/:id/ativo", async (req, res) => {
-  const ativo = z.object({ ativo: z.boolean() }).safeParse(req.body);
-  if (!ativo.success) return res.status(400).json({ erro: "Informe ativo: true ou false." });
+  const { ativo } = validar(z.object({ ativo: z.boolean() }), req.body, "Informe ativo: true ou false.");
 
-  if (req.params.id === req.usuario!.id && !ativo.data.ativo) {
-    return res.status(409).json({ erro: "Você não pode desativar a si mesmo." });
-  }
-  if (!ativo.data.ativo && (await ehUltimoRoot(req.params.id))) {
-    return res.status(409).json({ erro: "Este é o último root ativo." });
-  }
-  const alvo = await db.usuario.findUnique({ where: { id: req.params.id } });
-  if (!podeDefinir(req.usuario, alvo?.papel ?? "PADRAO")) {
-    return res.status(403).json({ erro: "Só o root altera usuários com papel elevado." });
-  }
-
+  if (req.params.id === req.usuario!.id && !ativo) throw new ErroHttp(409, "Você não pode desativar a si mesmo.");
+  if (!ativo && (await ehUltimoRoot(req.params.id))) throw new ErroHttp(409, "Este é o último root ativo.");
   const usuario = await db.usuario.update({
     where: { id: req.params.id },
-    data: { ativo: ativo.data.ativo },
+    data: { ativo },
     select: SELECAO,
   });
   // desativar derruba o acesso na hora, não no fim da sessão
-  if (!ativo.data.ativo) await db.sessao.deleteMany({ where: { usuarioId: usuario.id } });
+  if (!ativo) await db.sessao.deleteMany({ where: { usuarioId: usuario.id } });
   res.json(usuario);
 });
 
-rotasUsuarios.patch("/:id/papel", exigirPapel("ROOT"), async (req, res) => {
-  const corpo = z.object({ papel: papeis }).safeParse(req.body);
-  if (!corpo.success) return res.status(400).json({ erro: "Papel inválido." });
+rotasUsuarios.patch("/:id/papel", async (req, res) => {
+  const { papel } = validar(z.object({ papel: papeis }), req.body, "Papel inválido.");
 
-  if (corpo.data.papel !== "ROOT" && (await ehUltimoRoot(req.params.id))) {
-    return res.status(409).json({ erro: "Este é o último root ativo." });
-  }
+  if (papel !== "ROOT" && (await ehUltimoRoot(req.params.id))) throw new ErroHttp(409, "Este é o último root ativo.");
   res.json(
     await db.usuario.update({
       where: { id: req.params.id },
-      data: { papel: corpo.data.papel },
+      data: { papel },
       select: SELECAO,
     }),
   );
 });
 
 rotasUsuarios.post("/:id/senha", async (req, res) => {
-  const corpo = z.object({ senha: senhaForte }).safeParse(req.body);
-  if (!corpo.success) return res.status(400).json({ erro: corpo.error.issues[0].message });
-
-  const alvo = await db.usuario.findUnique({ where: { id: req.params.id } });
-  if (!podeDefinir(req.usuario, alvo?.papel ?? "PADRAO")) {
-    return res.status(403).json({ erro: "Só o root redefine senha de papel elevado." });
-  }
+  const { senha } = validar(z.object({ senha: senhaForte }), req.body);
 
   const usuario = await db.usuario.update({
     where: { id: req.params.id },
-    data: { senhaHash: await gerarHash(corpo.data.senha), precisaTrocarSenha: true },
+    data: { senhaHash: await gerarHash(senha), precisaTrocarSenha: true },
     select: SELECAO,
   });
   await db.sessao.deleteMany({ where: { usuarioId: usuario.id } });
@@ -135,22 +107,20 @@ rotasUsuarios.post("/:id/senha", async (req, res) => {
 export const rotaMinhaSenha = Router();
 
 rotaMinhaSenha.post("/", async (req, res) => {
-  const corpo = z
-    .object({ senhaAtual: z.string().min(1), senhaNova: senhaForte })
-    .safeParse(req.body);
-  if (!corpo.success) return res.status(400).json({ erro: corpo.error.issues[0].message });
+  const { senhaAtual, senhaNova } = validar(
+    z.object({ senhaAtual: z.string().min(1), senhaNova: senhaForte }),
+    req.body,
+  );
 
   const usuario = await db.usuario.findUnique({ where: { id: req.usuario!.id } });
-  if (!usuario || !(await verificarSenha(usuario.senhaHash, corpo.data.senhaAtual))) {
-    return res.status(401).json({ erro: "Senha atual incorreta." });
+  if (!usuario || !(await verificarSenha(usuario.senhaHash, senhaAtual))) {
+    throw new ErroHttp(401, "Senha atual incorreta.");
   }
-  if (corpo.data.senhaAtual === corpo.data.senhaNova) {
-    return res.status(400).json({ erro: "A nova senha precisa ser diferente da atual." });
-  }
+  if (senhaAtual === senhaNova) throw new ErroHttp(400, "A nova senha precisa ser diferente da atual.");
 
   await db.usuario.update({
     where: { id: usuario.id },
-    data: { senhaHash: await gerarHash(corpo.data.senhaNova), precisaTrocarSenha: false },
+    data: { senhaHash: await gerarHash(senhaNova), precisaTrocarSenha: false },
   });
   res.json({ ok: true });
 });

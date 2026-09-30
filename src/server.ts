@@ -1,13 +1,15 @@
 import "./env.js";
 import cookieParser from "cookie-parser";
-import express, { type NextFunction, type Request, type Response } from "express";
-import { carregarSessao, exigirLogin, exigirPapel, limparSessoes, rotasAuth } from "./auth.js";
+import express from "express";
+import { carregarSessao, exigirLogin, exigirPapel, exigirSessao, limparSessoes, rotasAuth } from "./auth.js";
 import { db } from "./db.js";
+import { tratarErros } from "./http.js";
 import { rotasLinks } from "./modules/links.js";
 import { rotasTermos } from "./modules/termos.js";
 import { rotaMinhaSenha, rotasUsuarios } from "./modules/usuarios.js";
 
 const app = express();
+app.disable("x-powered-by");
 const PORTA = Number(process.env.PORT ?? 3000);
 
 app.set("trust proxy", 1);
@@ -50,21 +52,15 @@ app.get("/saude", async (_req, res) => {
 });
 
 app.use("/api/auth", rotasAuth);
-// troca da própria senha fica ANTES do exigirLogin completo: quem precisa
-// trocar está bloqueado em todo o resto e ainda assim tem que conseguir trocar
-app.use("/api/minha-senha", (req, res, next) => {
-  if (!req.usuario) return res.status(401).json({ erro: "Sessão expirada. Entre novamente." });
-  next();
-}, rotaMinhaSenha);
+// só sessão, sem exigirLogin: quem precisa trocar a senha está bloqueado
+// em todo o resto e ainda assim tem que conseguir trocar
+app.use("/api/minha-senha", exigirSessao, rotaMinhaSenha);
 
-app.use("/api/usuarios", exigirLogin, exigirPapel("ADMIN"), rotasUsuarios);
+app.use("/api/usuarios", exigirLogin, exigirPapel("ROOT"), rotasUsuarios);
 app.use("/api/links", exigirLogin, rotasLinks);
 app.use("/api/termos", exigirLogin, rotasTermos);
 
-app.use((erro: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  console.error(erro);
-  res.status(500).json({ erro: "Erro interno. Confira os logs do container." });
-});
+app.use(tratarErros);
 
 await limparSessoes();
 setInterval(() => void limparSessoes().catch(console.error), 1000 * 60 * 60);

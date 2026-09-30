@@ -58,6 +58,8 @@ model Link {
   ordem       Int      @default(0)
   /// marque true para planilha/sistema que deve ser aposentado
   aDescontinuar Boolean @default(false)
+  /// flags livres para a busca: "financeiro", "estoque"... sempre minúsculas
+  etiquetas   String[] @default([])
   criadoEm    DateTime @default(now())
   atualizadoEm DateTime @updatedAt
 

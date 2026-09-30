@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
+import type { Papel } from "@prisma/client";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { db } from "./db.js";
+import { ErroHttp, validar } from "./http.js";
 
 const COOKIE = "pax_sessao";
 const DURACAO_MS = 1000 * 60 * 60 * 12; // 12h
@@ -14,7 +16,7 @@ declare global {
         id: string;
         nome: string;
         email: string;
-        papel: "ROOT" | "ADMIN" | "PADRAO";
+        papel: Papel;
         precisaTrocarSenha: boolean;
       };
     }
@@ -22,6 +24,9 @@ declare global {
 }
 
 export const gerarHash = (senha: string) => hash(senha);
+
+// usado quando o e-mail não existe: o login leva o mesmo tempo e não revela quem está cadastrado
+const HASH_FALSO = hash("senha-que-nunca-confere");
 export const verificarSenha = (hashArmazenado: string, senha: string) =>
   verify(hashArmazenado, senha);
 
@@ -56,24 +61,30 @@ export async function carregarSessao(req: Request, _res: Response, next: NextFun
   next();
 }
 
-export function exigirLogin(req: Request, res: Response, next: NextFunction) {
-  if (!req.usuario) return res.status(401).json({ erro: "Sessão expirada. Entre novamente." });
-  // senha definida por outra pessoa: nada funciona até a troca.
-  // A verificação fica aqui, e não só na tela, para que a regra valha
-  // também para quem chamar a API direto.
-  if (req.usuario.precisaTrocarSenha) {
-    return res.status(403).json({ erro: "Troque sua senha antes de usar o sistema.", trocarSenha: true });
-  }
+export function exigirSessao(req: Request, _res: Response, next: NextFunction) {
+  // a marca separa "sessão caiu" de outros 401, como senha atual incorreta
+  if (!req.usuario) throw new ErroHttp(401, "Sessão expirada. Entre novamente.", { sessaoExpirada: true });
   next();
 }
 
-/** ROOT > ADMIN > PADRAO. exigirPapel("ADMIN") libera ADMIN e ROOT. */
-const FORCA = { PADRAO: 0, ADMIN: 1, ROOT: 2 } as const;
+export function exigirLogin(req: Request, res: Response, next: NextFunction) {
+  exigirSessao(req, res, () => {
+    // senha definida por outra pessoa: nada funciona até a troca, nem pela API direto
+    if (req.usuario!.precisaTrocarSenha) {
+      throw new ErroHttp(403, "Troque sua senha antes de usar o sistema.", { trocarSenha: true });
+    }
+    next();
+  });
+}
 
-export function exigirPapel(minimo: keyof typeof FORCA) {
-  return (req: Request, res: Response, next: NextFunction) => {
+/** ROOT > ADMIN > PADRAO. exigirPapel("ADMIN") libera ADMIN e ROOT. */
+const FORCA: Record<Papel, number> = { PADRAO: 0, ADMIN: 1, ROOT: 2 };
+
+export function exigirPapel(minimo: Papel) {
+  // Request<any>: deixa a rota seguinte deduzir os parâmetros (:id) pelo caminho
+  return (req: Request<any>, _res: Response, next: NextFunction) => {
     if (!req.usuario || FORCA[req.usuario.papel] < FORCA[minimo]) {
-      return res.status(403).json({ erro: "Seu perfil não permite esta ação." });
+      throw new ErroHttp(403, "Seu perfil não permite esta ação.");
     }
     next();
   };
@@ -87,20 +98,18 @@ const entrada = z.object({
 export const rotasAuth = Router();
 
 rotasAuth.post("/login", async (req, res) => {
-  const dados = entrada.safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: "E-mail ou senha em formato inválido." });
+  const dados = validar(entrada, req.body, "E-mail ou senha em formato inválido.");
 
-  const email = dados.data.email.toLowerCase().trim();
-  if (bloqueado(email)) {
-    return res.status(429).json({ erro: "Muitas tentativas. Tente novamente em 10 minutos." });
-  }
+  const email = dados.email.toLowerCase().trim();
+  if (bloqueado(email)) throw new ErroHttp(429, "Muitas tentativas. Tente novamente em 10 minutos.");
 
   const usuario = await db.usuario.findUnique({ where: { email } });
   // mesma resposta para usuário inexistente e senha errada
-  const ok = usuario?.ativo ? await verify(usuario.senhaHash, dados.data.senha) : false;
+  const hashParaConferir = usuario?.ativo ? usuario.senhaHash : await HASH_FALSO;
+  const ok = (await verify(hashParaConferir, dados.senha)) && !!usuario?.ativo;
   if (!usuario || !ok) {
     registrarFalha(email);
-    return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+    throw new ErroHttp(401, "E-mail ou senha incorretos.");
   }
 
   tentativas.delete(email);
@@ -131,7 +140,7 @@ rotasAuth.post("/logout", async (req, res) => {
 });
 
 rotasAuth.get("/eu", (req, res) => {
-  if (!req.usuario) return res.status(401).json({ erro: "Não autenticado." });
+  if (!req.usuario) throw new ErroHttp(401, "Não autenticado.");
   res.json(req.usuario);
 });
 

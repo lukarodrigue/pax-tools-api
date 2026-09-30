@@ -1,6 +1,7 @@
 /**
- * Cria ou redefine um usuário.
- *   docker compose exec app npm run usuario -- email@pax.com "Nome Sobrenome" "senha"
+ * Cria o primeiro ROOT ou redefine a senha de um usuário existente.
+ * Um usuário que já existe mantém o papel que tem.
+ *   docker compose exec api npm run usuario:prod -- email@pax.com "Nome Sobrenome" "senha"
  */
 import "./env.js";
 import { gerarHash } from "./auth.js";
@@ -20,11 +21,11 @@ if (senha.length < 10) {
 const senhaHash = await gerarHash(senha);
 const usuario = await db.usuario.upsert({
   where: { email: email.toLowerCase() },
-  update: { senhaHash, nome, ativo: true, papel: "ROOT" },
+  update: { senhaHash, nome, ativo: true },
   create: { email: email.toLowerCase(), nome, senhaHash, papel: "ROOT" },
 });
 
 // trocar a senha derruba as sessões abertas
 await db.sessao.deleteMany({ where: { usuarioId: usuario.id } });
-console.log(`usuário pronto: ${usuario.email}`);
+console.log(`usuário pronto: ${usuario.email} (${usuario.papel})`);
 await db.$disconnect();

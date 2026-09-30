@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { exigirPapel } from "../auth.js";
 import { db } from "../db.js";
+import { ErroHttp, validar } from "../http.js";
 
 export const rotasLinks = Router();
 
@@ -13,6 +14,12 @@ const urlInterna = z
     message: "Informe a URL completa (http://, https:// ou caminho de rede \\\\servidor\\pasta).",
   });
 
+// minúsculas e sem repetição: "Financeiro" e "financeiro " viram a mesma etiqueta
+const etiquetas = z
+  .array(z.string().trim().min(1).max(30, "Cada etiqueta pode ter até 30 caracteres."))
+  .max(15, "No máximo 15 etiquetas por link.")
+  .transform((lista) => [...new Set(lista.map((e) => e.toLowerCase()))]);
+
 const corpoLink = z.object({
   titulo: z.string().trim().min(1).max(120),
   url: urlInterna,
@@ -20,6 +27,7 @@ const corpoLink = z.object({
   grupoId: z.string().min(1),
   ordem: z.number().int().optional(),
   aDescontinuar: z.boolean().optional(),
+  etiquetas: etiquetas.optional(),
 });
 
 const corpoGrupo = z.object({
@@ -34,7 +42,6 @@ rotasLinks.get("/painel", async (_req, res) => {
       links: {
         where: { excluidoEm: null },
         orderBy: [{ ordem: "asc" }, { titulo: "asc" }],
-        include: { criadoPor: { select: { nome: true } } },
       },
     },
   });
@@ -42,35 +49,42 @@ rotasLinks.get("/painel", async (_req, res) => {
 });
 
 rotasLinks.post("/grupos", exigirPapel("ADMIN"), async (req, res) => {
-  const dados = corpoGrupo.safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: dados.error.issues[0].message });
-  const existente = await db.grupo.findUnique({ where: { nome: dados.data.nome } });
-  if (existente) return res.status(409).json({ erro: "Já existe um grupo com esse nome." });
-  res.status(201).json(await db.grupo.create({ data: dados.data }));
+  const dados = validar(corpoGrupo, req.body);
+  if (await db.grupo.findUnique({ where: { nome: dados.nome } })) {
+    throw new ErroHttp(409, "Já existe um grupo com esse nome.");
+  }
+  res.status(201).json(await db.grupo.create({ data: dados }));
+});
+
+rotasLinks.put("/grupos/:id", exigirPapel("ADMIN"), async (req, res) => {
+  const { nome } = validar(corpoGrupo.pick({ nome: true }), req.body);
+  const existente = await db.grupo.findUnique({ where: { nome } });
+  if (existente && existente.id !== req.params.id) throw new ErroHttp(409, "Já existe um grupo com esse nome.");
+  res.json(await db.grupo.update({ where: { id: req.params.id }, data: { nome } }));
 });
 
 rotasLinks.delete("/grupos/:id", exigirPapel("ROOT"), async (req, res) => {
-  const qtd = await db.link.count({ where: { grupoId: req.params.id, excluidoEm: null } });
-  if (qtd > 0) {
-    return res.status(409).json({ erro: `Mova ou apague os ${qtd} links deste grupo antes.` });
+  const [ativos, naLixeira] = await Promise.all([
+    db.link.count({ where: { grupoId: req.params.id, excluidoEm: null } }),
+    db.link.count({ where: { grupoId: req.params.id, excluidoEm: { not: null } } }),
+  ]);
+  if (ativos > 0) throw new ErroHttp(409, `Mova ou exclua os ${ativos} links deste grupo antes.`);
+  if (naLixeira > 0) {
+    throw new ErroHttp(409, `Há ${naLixeira} links deste grupo na lixeira. Restaure ou apague de vez antes.`);
   }
   await db.grupo.delete({ where: { id: req.params.id } });
   res.json({ ok: true });
 });
 
-rotasLinks.post("/", async (req, res) => {
-  const dados = corpoLink.safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: dados.error.issues[0].message });
-  const link = await db.link.create({
-    data: { ...dados.data, criadoPorId: req.usuario!.id },
-  });
+rotasLinks.post("/", exigirPapel("ADMIN"), async (req, res) => {
+  const dados = validar(corpoLink, req.body);
+  const link = await db.link.create({ data: { ...dados, criadoPorId: req.usuario!.id } });
   res.status(201).json(link);
 });
 
 rotasLinks.put("/:id", exigirPapel("ADMIN"), async (req, res) => {
-  const dados = corpoLink.partial().safeParse(req.body);
-  if (!dados.success) return res.status(400).json({ erro: dados.error.issues[0].message });
-  const link = await db.link.update({ where: { id: req.params.id }, data: dados.data });
+  const dados = validar(corpoLink.partial(), req.body);
+  const link = await db.link.update({ where: { id: req.params.id }, data: dados });
   res.json(link);
 });
 
@@ -112,9 +126,7 @@ rotasLinks.post("/:id/restaurar", exigirPapel("ROOT"), async (req, res) => {
 
 rotasLinks.delete("/:id/definitivo", exigirPapel("ROOT"), async (req, res) => {
   const link = await db.link.findUnique({ where: { id: req.params.id } });
-  if (!link?.excluidoEm) {
-    return res.status(409).json({ erro: "Mande para a lixeira antes de apagar de vez." });
-  }
+  if (!link?.excluidoEm) throw new ErroHttp(409, "Mande para a lixeira antes de apagar de vez.");
   await db.link.delete({ where: { id: req.params.id } });
   res.json({ ok: true });
 });

@@ -1,6 +1,13 @@
 :80 {
 	encode gzip
 
+	header {
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
 	handle /api/* {
 		reverse_proxy api:3000
 	}

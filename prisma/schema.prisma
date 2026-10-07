@@ -4,6 +4,12 @@ enum Papel {
   PADRAO // usa o sistema, nao exclui nada
 }
 
+/// Qual modelo .docx gerou o termo (src/templates)
+enum TipoTermo {
+  PADRAO            // termo.docx: itens livres, qualquer filial
+  COBRADOR_DOURADOS // termo_cobrador_dourados.docx: kit celular + impressora + maquina
+}
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -81,6 +87,7 @@ model Link {
 /// Registro de cada termo emitido — rastreabilidade de quem recebeu o quê.
 model Termo {
   id           String   @id @default(cuid())
+  tipo         TipoTermo @default(PADRAO)
   nomePessoa   String
   cpf          String
   filial       String

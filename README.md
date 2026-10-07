@@ -56,6 +56,7 @@ src/
     usuarios.ts      cadastro, papéis, desativação e troca de senha
   templates/
     termo.docx       modelo do termo com marcadores {{...}}
+    termo_cobrador_dourados.docx  termo do kit de cobrança móvel de Dourados (celular, impressora, máquina)
 prisma/
   schema.prisma      tabelas
   migrations/        histórico de alterações do banco (commitar sempre)
